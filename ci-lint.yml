@@ -1,0 +1,174 @@
+name: CI Lint (reusable)
+
+# Reusable workflow for Odoo module repos (odoo-bmya, bmya-enterprise, etc.).
+# Called from each repo's .github/workflows/ci.yml on pull_request events.
+#
+# Produces four GitHub Checks on every PR:
+#   - ci/commits   → PR must have exactly 1 commit (squash discipline)
+#   - ci/odoolint  → OCA odoo-pre-commit-hooks (manifests, XML, deprecations)
+#   - ci/security  → ir.model.access.csv completeness (all models have access rules)
+#   - ci/style     → flake8-odoo + isort (PEP8 + Odoo conventions)
+#
+# robbmya bypass flags: r+ override=commits|lint|security|style
+
+on:
+  workflow_call:
+    inputs:
+      odoo_version:
+        description: "Odoo version (e.g. 17.0, 18.0, 19.0, master)"
+        required: true
+        type: string
+
+jobs:
+  commits:
+    name: ci/commits
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Check single commit
+        env:
+          COMMITS: ${{ github.event.pull_request.commits }}
+        run: |
+          if [ "$COMMITS" -gt 1 ]; then
+            echo "❌ PR has $COMMITS commits. Please squash to 1 commit before merging."
+            echo ""
+            echo "   git rebase -i HEAD~$COMMITS"
+            echo ""
+            echo "Or from your branch:"
+            echo "   git reset --soft \$(git merge-base HEAD origin/${{ github.base_ref }})"
+            echo "   git commit -m 'your message'"
+            exit 1
+          fi
+          echo "✓ PR has exactly 1 commit"
+
+  odoolint:
+    name: ci/odoolint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install oca-odoo-pre-commit-hooks
+        run: |
+          python -m pip install --upgrade pip
+          pip install oca-odoo-pre-commit-hooks
+
+      - name: Run oca checks
+        run: |
+          MODULES=$(find . -name "__manifest__.py" -not -path "*/.*" -exec dirname {} \;)
+          if [ -z "$MODULES" ]; then
+            echo "No Odoo modules found, skipping"
+            exit 0
+          fi
+          oca-checks-odoo-module $MODULES
+
+  security:
+    name: ci/security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check ir.model.access.csv completeness
+        run: |
+          python3 - <<'PYEOF'
+          import os, re, sys, csv
+
+          errors = []
+
+          for root, dirs, files in os.walk('.'):
+              dirs[:] = sorted(d for d in dirs if not d.startswith('.') and d != '__pycache__')
+              if '__manifest__.py' not in files:
+                  continue
+              module = os.path.basename(root)
+
+              # Collect concrete model names (_name set, not abstract or transient)
+              models = set()
+              for dirpath, _, pyfiles in os.walk(root):
+                  for fn in pyfiles:
+                      if not fn.endswith('.py'):
+                          continue
+                      try:
+                          content = open(os.path.join(dirpath, fn)).read()
+                      except Exception:
+                          continue
+                      # Find classes that declare _name
+                      for cls_match in re.finditer(
+                          r'class\s+\w+\s*\([^)]*\):\s*((?:(?!\nclass\s).)*)',
+                          content, re.DOTALL
+                      ):
+                          body = cls_match.group(1)
+                          name_m = re.search(r'_name\s*=\s*["\']([a-z][a-z0-9_.]+)["\']', body)
+                          if not name_m:
+                              continue
+                          # Skip abstract and transient models
+                          if re.search(r'_abstract\s*=\s*True', body):
+                              continue
+                          if re.search(r'_transient\s*=\s*True', body):
+                              continue
+                          models.add(name_m.group(1))
+
+              if not models:
+                  continue
+
+              # Parse ir.model.access.csv
+              access_file = os.path.join(root, 'security', 'ir.model.access.csv')
+              covered = set()
+              if os.path.exists(access_file):
+                  with open(access_file, newline='') as f:
+                      reader = csv.DictReader(f)
+                      for row in reader:
+                          # Support both 'model_id:id' and 'model_id/id' header formats
+                          field = row.get('model_id:id') or row.get('model_id/id') or ''
+                          # 'model_account_move' -> 'account.move'
+                          name = re.sub(r'^model_', '', field).replace('_', '.')
+                          covered.add(name)
+
+              for model in sorted(models):
+                  if model not in covered:
+                      errors.append(f"  {module}: '{model}' missing from security/ir.model.access.csv")
+
+          if errors:
+              print("❌ Models without access rules:")
+              for e in errors:
+                  print(e)
+              sys.exit(1)
+          print("✓ All models have ir.model.access.csv entries")
+          PYEOF
+
+  style:
+    name: ci/style
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install linters
+        run: |
+          python -m pip install --upgrade pip
+          pip install flake8 flake8-odoo isort
+
+      - name: flake8
+        run: |
+          if [ -f .flake8 ]; then
+            flake8 .
+          else
+            flake8 --max-line-length=120 --extend-ignore=E501,W503,W504 --exclude=__manifest__.py,.git,__pycache__ .
+          fi
+
+      - name: isort
+        run: |
+          if [ -f .isort.cfg ] || [ -f pyproject.toml ]; then
+            isort --check-only --diff .
+          else
+            isort --check-only --diff --profile=black .
+          fi
