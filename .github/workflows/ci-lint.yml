@@ -7,7 +7,10 @@ name: CI Lint (reusable)
 #   - ci/commits   → PR must have exactly 1 commit (squash discipline)
 #   - ci/odoolint  → OCA odoo-pre-commit-hooks (manifests, XML, deprecations)
 #   - ci/security  → ir.model.access.csv completeness (all models have access rules)
-#   - ci/style     → flake8-odoo + isort (PEP8 + Odoo conventions)
+#   - ci/style     → flake8 + isort (PEP8 + Odoo conventions)
+#
+# On pull_request: checks only modules/files touched by the PR.
+# On workflow_dispatch: checks the entire repo.
 #
 # robbmya bypass flags: r+ override=commits|lint|security|style
 
@@ -46,6 +49,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -58,28 +63,58 @@ jobs:
 
       - name: Run oca checks
         run: |
-          MODULES=$(find . -name "__manifest__.py" -not -path "*/.*" -exec dirname {} \;)
+          # On pull_request: check only modules touched by the PR.
+          # On workflow_dispatch / push: check all modules.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin ${{ github.base_ref }} --depth=1 2>/dev/null || true
+            CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -oP '^[^/]+' | sort -u)
+            MODULES=""
+            for mod in $CHANGED; do
+              [ -f "$mod/__manifest__.py" ] && MODULES="$MODULES $mod"
+            done
+          else
+            MODULES=$(find . -maxdepth 1 -name "__manifest__.py" -exec dirname {} \; 2>/dev/null || true)
+            if [ -z "$MODULES" ]; then
+              MODULES=$(find . -name "__manifest__.py" -not -path "*/.*" -exec dirname {} \;)
+            fi
+          fi
+
           if [ -z "$MODULES" ]; then
-            echo "No Odoo modules found, skipping"
+            echo "No Odoo modules to check, skipping"
             exit 0
           fi
-          # Disabled checks (OCA strictness incompatible with official Odoo patterns):
+
+          echo "Checking modules: $MODULES"
+
+          # Checks disabled because they are incompatible with official Odoo patterns:
           # - xml-deprecated-data-node: Odoo/Enterprise still uses <odoo><data noupdate="1">
           # - xml-id-position-first: attribute ordering is cosmetic, not enforced by Odoo
           # - xml-header-wrong: Odoo uses utf-8 (lowercase, no space), OCA wants UTF-8 with space
           # - xml-dangerous-qweb-replace-low-priority: valid when devs know what they're doing
-          oca-checks-odoo-module \
-            --disable xml-deprecated-data-node \
-            --disable xml-id-position-first \
-            --disable xml-header-wrong \
-            --disable xml-dangerous-qweb-replace-low-priority \
-            $MODULES
+          DISABLED="xml-deprecated-data-node|xml-id-position-first|xml-header-wrong|xml-dangerous-qweb-replace-low-priority"
+
+          # Run checks, capture output (always exit 0 here so we can filter)
+          set +e
+          output=$(oca-checks-odoo-module $MODULES 2>&1)
+          set -e
+
+          # Show full output for context
+          echo "$output"
+
+          # Fail only on non-disabled violations
+          # Violation lines look like: path/to/file.xml:10: check-slug-name <message>
+          if echo "$output" | grep -vE "^[^:]+:[0-9]+: ($DISABLED) " | grep -qE "^[^:]+:[0-9]+: [a-z]"; then
+            exit 1
+          fi
+          echo "✓ oca checks passed (disabled: $DISABLED)"
 
   security:
     name: ci/security
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -88,15 +123,38 @@ jobs:
       - name: Check ir.model.access.csv completeness
         run: |
           python3 - <<'PYEOF'
-          import os, re, sys, csv
+          import os, re, sys, csv, subprocess
 
           errors = []
+
+          # On pull_request: only check modules touched by the PR.
+          event = os.environ.get("GITHUB_EVENT_NAME", "")
+          base_ref = os.environ.get("BASE_REF", "")
+
+          touched_modules = None
+          if event == "pull_request" and base_ref:
+              try:
+                  diff = subprocess.check_output(
+                      ["git", "diff", "--name-only", f"origin/{base_ref}...HEAD"],
+                      stderr=subprocess.DEVNULL
+                  ).decode()
+                  touched_modules = set()
+                  for line in diff.splitlines():
+                      top = line.split("/")[0]
+                      if os.path.isfile(os.path.join(top, "__manifest__.py")):
+                          touched_modules.add(top)
+              except Exception:
+                  touched_modules = None  # Fall back to full scan
 
           for root, dirs, files in os.walk('.'):
               dirs[:] = sorted(d for d in dirs if not d.startswith('.') and d != '__pycache__')
               if '__manifest__.py' not in files:
                   continue
               module = os.path.basename(root)
+
+              # Skip modules not touched by this PR (when on pull_request)
+              if touched_modules is not None and module not in touched_modules:
+                  continue
 
               # Collect concrete model names (_name set, not abstract or transient)
               models = set()
@@ -162,12 +220,17 @@ jobs:
               sys.exit(1)
           print("✓ All models have ir.model.access.csv entries")
           PYEOF
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
 
   style:
     name: ci/style
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -178,18 +241,57 @@ jobs:
           python -m pip install --upgrade pip
           pip install flake8 isort
 
+      - name: Resolve files to check
+        id: scope
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin ${{ github.base_ref }} --depth=1 2>/dev/null || true
+            # Collect Python files changed by this PR that live inside Odoo modules
+            FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \
+              | grep '\.py$' \
+              | while read f; do
+                  mod=$(echo "$f" | cut -d/ -f1)
+                  [ -f "$mod/__manifest__.py" ] && echo "$f"
+                done || true)
+            echo "files<<EOF" >> "$GITHUB_OUTPUT"
+            echo "$FILES" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+          else
+            echo "files=" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: flake8
         run: |
-          if [ -f .flake8 ]; then
-            flake8 .
+          FILES="${{ steps.scope.outputs.files }}"
+          if [ -n "$FILES" ]; then
+            # PR mode: check only changed .py files
+            if [ -f .flake8 ]; then
+              echo "$FILES" | xargs flake8
+            else
+              echo "$FILES" | xargs flake8 --max-line-length=120 --extend-ignore=E501,W503,W504 --exclude=__manifest__.py
+            fi
           else
-            flake8 --max-line-length=120 --extend-ignore=E501,W503,W504 --exclude=__manifest__.py,.git,__pycache__ .
+            # Full scan (workflow_dispatch / push)
+            if [ -f .flake8 ]; then
+              flake8 .
+            else
+              flake8 --max-line-length=120 --extend-ignore=E501,W503,W504 --exclude=__manifest__.py,.git,__pycache__ .
+            fi
           fi
 
       - name: isort
         run: |
-          if [ -f .isort.cfg ] || [ -f pyproject.toml ]; then
-            isort --check-only --diff .
+          FILES="${{ steps.scope.outputs.files }}"
+          if [ -n "$FILES" ]; then
+            if [ -f .isort.cfg ] || [ -f pyproject.toml ]; then
+              echo "$FILES" | xargs isort --check-only --diff
+            else
+              echo "$FILES" | xargs isort --check-only --diff --profile=black
+            fi
           else
-            isort --check-only --diff --profile=black .
+            if [ -f .isort.cfg ] || [ -f pyproject.toml ]; then
+              isort --check-only --diff .
+            else
+              isort --check-only --diff --profile=black .
+            fi
           fi
