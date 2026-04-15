@@ -63,7 +63,9 @@ jobs:
             echo "No Odoo modules found, skipping"
             exit 0
           fi
-          oca-checks-odoo-module $MODULES
+          # xml-deprecated-data-node disabled: official Odoo/Enterprise still uses
+          # <odoo><data noupdate="1"> and forcing the change breaks compatibility.
+          oca-checks-odoo-module --disable xml-deprecated-data-node $MODULES
 
   security:
     name: ci/security
