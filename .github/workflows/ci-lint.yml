@@ -66,9 +66,11 @@ jobs:
           # Disabled checks (OCA strictness incompatible with official Odoo patterns):
           # - xml-deprecated-data-node: Odoo/Enterprise still uses <odoo><data noupdate="1">
           # - xml-id-position-first: attribute ordering is cosmetic, not enforced by Odoo
+          # - xml-header-wrong: Odoo uses utf-8 (lowercase, no space), OCA wants UTF-8 with space
           oca-checks-odoo-module \
             --disable xml-deprecated-data-node \
             --disable xml-id-position-first \
+            --disable xml-header-wrong \
             $MODULES
 
   security:
