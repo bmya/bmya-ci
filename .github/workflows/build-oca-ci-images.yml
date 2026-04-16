@@ -2,7 +2,7 @@ name: Build custom OCA CI images
 
 on:
   push:
-    branches: [master]
+    branches: [main]
     paths:
       - "docker/oca-ci/**"
   workflow_dispatch:
