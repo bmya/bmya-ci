@@ -22,6 +22,8 @@ jobs:
             python: "py3.10"
           - version: "18.0"
             python: "py3.10"
+          - version: "19.0"
+            python: "py3.10"
 
     steps:
       - uses: actions/checkout@v4
