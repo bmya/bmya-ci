@@ -246,12 +246,13 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             git fetch origin ${{ github.base_ref }} --depth=1 2>/dev/null || true
-            # Collect Python files changed by this PR that live inside Odoo modules
-            FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD \
+            # Collect Python files changed by this PR that live inside Odoo modules.
+            # --diff-filter=d excludes deletions so linters don't try to read missing files.
+            FILES=$(git diff --name-only --diff-filter=d origin/${{ github.base_ref }}...HEAD \
               | grep '\.py$' \
               | while read f; do
                   mod=$(echo "$f" | cut -d/ -f1)
-                  [ -f "$mod/__manifest__.py" ] && echo "$f"
+                  [ -f "$mod/__manifest__.py" ] && [ -f "$f" ] && echo "$f"
                 done || true)
             echo "files<<EOF" >> "$GITHUB_OUTPUT"
             echo "$FILES" >> "$GITHUB_OUTPUT"
