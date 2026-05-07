@@ -91,6 +91,33 @@ jobs:
             exit 0
           fi
 
+          # Drop modules with installable=False: they won't be installed, so
+          # Odoo-semantic checks (manifest validity, model conventions, deps)
+          # produce false positives. Style/security still run on them via
+          # the other jobs.
+          MODULES=$(python3 - "$MODULES" <<'PYEOF'
+          import sys, ast
+          kept, dropped = [], []
+          for mod in (sys.argv[1].split() if len(sys.argv) > 1 else []):
+              try:
+                  data = ast.literal_eval(open(f"{mod}/__manifest__.py").read())
+                  if isinstance(data, dict) and data.get("installable", True) is False:
+                      dropped.append(mod)
+                      continue
+              except Exception:
+                  pass  # broken manifest → keep, let the check surface it
+              kept.append(mod)
+          if dropped:
+              print("Skipping installable=False modules: " + " ".join(dropped), file=sys.stderr)
+          print(" ".join(kept))
+          PYEOF
+          )
+
+          if [ -z "$MODULES" ]; then
+            echo "All touched modules have installable=False, nothing to check"
+            exit 0
+          fi
+
           echo "Checking modules: $MODULES"
 
           # Checks disabled because they are incompatible with official Odoo patterns:
@@ -389,6 +416,11 @@ jobs:
                   continue
               if not isinstance(manifest, dict):
                   errors.append(f"{manifest_path}: top-level value is not a dict")
+                  continue
+
+              # Skip modules with installable=False — branding is a presentation
+              # rule and these won't be installed/shown.
+              if manifest.get("installable", True) is False:
                   continue
 
               author = manifest.get("author", "") or ""
