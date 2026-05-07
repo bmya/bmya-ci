@@ -3,16 +3,17 @@ name: CI Lint (reusable)
 # Reusable workflow for Odoo module repos (odoo-bmya, bmya-enterprise, etc.).
 # Called from each repo's .github/workflows/ci.yml on pull_request events.
 #
-# Produces four GitHub Checks on every PR:
+# Produces five GitHub Checks on every PR:
 #   - ci/commits   → PR must have exactly 1 commit (squash discipline)
 #   - ci/odoolint  → OCA odoo-pre-commit-hooks (manifests, XML, deprecations)
 #   - ci/security  → ir.model.access.csv completeness (all models have access rules)
 #   - ci/style     → flake8 + isort (PEP8 + Odoo conventions)
+#   - ci/branding  → manifest 'author' / 'website' canonicalization (BMYA repos only)
 #
 # On pull_request: checks only modules/files touched by the PR.
 # On workflow_dispatch: checks the entire repo.
 #
-# robbmya bypass flags: r+ override=commits|lint|security|style
+# robbmya bypass flags: r+ override=commits|lint|security|style|branding
 
 on:
   workflow_call:
@@ -62,12 +63,18 @@ jobs:
           pip install oca-odoo-pre-commit-hooks
 
       - name: Run oca checks
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           # On pull_request: check only modules touched by the PR.
           # On workflow_dispatch / push: check all modules.
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git fetch origin ${{ github.base_ref }} --depth=1 2>/dev/null || true
-            CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -oP '^[^/]+' | sort -u)
+            if [ -z "$BASE_SHA" ]; then
+              echo "❌ BASE_SHA is empty in pull_request context; cannot determine PR scope."
+              exit 1
+            fi
+            git fetch origin "$BASE_SHA" --depth=1
+            CHANGED=$(git diff --name-only "$BASE_SHA..HEAD" | grep -oP '^[^/]+' | sort -u)
             MODULES=""
             for mod in $CHANGED; do
               [ -f "$mod/__manifest__.py" ] && MODULES="$MODULES $mod"
@@ -129,22 +136,24 @@ jobs:
 
           # On pull_request: only check modules touched by the PR.
           event = os.environ.get("GITHUB_EVENT_NAME", "")
-          base_ref = os.environ.get("BASE_REF", "")
+          base_sha = os.environ.get("BASE_SHA", "")
 
           touched_modules = None
-          if event == "pull_request" and base_ref:
-              try:
-                  diff = subprocess.check_output(
-                      ["git", "diff", "--name-only", f"origin/{base_ref}...HEAD"],
-                      stderr=subprocess.DEVNULL
-                  ).decode()
-                  touched_modules = set()
-                  for line in diff.splitlines():
-                      top = line.split("/")[0]
-                      if os.path.isfile(os.path.join(top, "__manifest__.py")):
-                          touched_modules.add(top)
-              except Exception:
-                  touched_modules = None  # Fall back to full scan
+          if event == "pull_request":
+              if not base_sha:
+                  print("❌ BASE_SHA is empty in pull_request context; cannot determine PR scope.")
+                  sys.exit(1)
+              # Ensure the base commit is fetched, then compute touched modules.
+              # Failing here is intentional — silent fallback to full scan would hide the bug.
+              subprocess.check_call(["git", "fetch", "origin", base_sha, "--depth=1"])
+              diff = subprocess.check_output(
+                  ["git", "diff", "--name-only", f"{base_sha}..HEAD"]
+              ).decode()
+              touched_modules = set()
+              for line in diff.splitlines():
+                  top = line.split("/")[0]
+                  if os.path.isfile(os.path.join(top, "__manifest__.py")):
+                      touched_modules.add(top)
 
           for root, dirs, files in os.walk('.'):
               dirs[:] = sorted(d for d in dirs if not d.startswith('.') and d != '__pycache__')
@@ -222,7 +231,7 @@ jobs:
           PYEOF
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
-          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
 
   style:
     name: ci/style
@@ -243,12 +252,18 @@ jobs:
 
       - name: Resolve files to check
         id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git fetch origin ${{ github.base_ref }} --depth=1 2>/dev/null || true
+            if [ -z "$BASE_SHA" ]; then
+              echo "❌ BASE_SHA is empty in pull_request context; cannot determine PR scope."
+              exit 1
+            fi
+            git fetch origin "$BASE_SHA" --depth=1
             # Collect Python files changed by this PR that live inside Odoo modules.
             # --diff-filter=d excludes deletions so linters don't try to read missing files.
-            FILES=$(git diff --name-only --diff-filter=d origin/${{ github.base_ref }}...HEAD \
+            FILES=$(git diff --name-only --diff-filter=d "$BASE_SHA..HEAD" \
               | grep '\.py$' \
               | while read f; do
                   mod=$(echo "$f" | cut -d/ -f1)
@@ -296,3 +311,111 @@ jobs:
               isort --check-only --diff --profile=black .
             fi
           fi
+
+  branding:
+    name: ci/branding
+    runs-on: ubuntu-latest
+    # BMYA-only check: enforces canonical author/website in __manifest__.py.
+    # Add new BMYA repos to this list as they appear.
+    if: contains(fromJSON('["odoo-bmya","bmya-enterprise","bmya-enterprise-release","bmya-tools","bmya-ai","bmya-crm","odoo-partner-tools"]'), github.event.repository.name)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Validate manifest author/website
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          python3 - <<'PYEOF'
+          import os, re, sys, ast, subprocess
+
+          REQUIRED_AUTHOR = "Blanco Martín y Asociados SpA"
+          REQUIRED_WEBSITE = "https://www.bmya.cl"
+          # Forbidden ways of naming BMYA — any occurrence triggers a violation,
+          # even if the canonical form is also present (no mixing nomenclatures).
+          FORBIDDEN_AUTHOR_PATTERNS = [
+              (r"\bBMYA\b",                          "use 'Blanco Martín y Asociados SpA' instead of 'BMYA'"),
+              (r"\bBMyA\b",                          "use 'Blanco Martín y Asociados SpA' instead of 'BMyA'"),
+              (r"\bbmya\b",                          "use 'Blanco Martín y Asociados SpA' instead of 'bmya'"),
+              (r"Blanco Mart[ií]n\s*&\s*Asociados",  "use 'Blanco Martín y Asociados SpA' (use 'y' instead of '&'; include 'SpA')"),
+              (r"\bBlanco Martin\b",                 "use 'Blanco Martín y Asociados SpA' (must have tilde in 'Martín')"),
+          ]
+
+          event = os.environ.get("GITHUB_EVENT_NAME", "")
+          base_sha = os.environ.get("BASE_SHA", "")
+
+          touched_modules = None
+          if event == "pull_request":
+              if not base_sha:
+                  print("❌ BASE_SHA is empty in pull_request context; cannot determine PR scope.")
+                  sys.exit(1)
+              subprocess.check_call(["git", "fetch", "origin", base_sha, "--depth=1"])
+              diff = subprocess.check_output(
+                  ["git", "diff", "--name-only", f"{base_sha}..HEAD"]
+              ).decode()
+              touched_modules = set()
+              for line in diff.splitlines():
+                  top = line.split("/")[0]
+                  if os.path.isfile(os.path.join(top, "__manifest__.py")):
+                      touched_modules.add(top)
+              if not touched_modules:
+                  print("No modules touched by this PR — skipping branding check.")
+                  sys.exit(0)
+
+          errors = []
+
+          for root, dirs, files in os.walk("."):
+              dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d != "__pycache__")
+              if "__manifest__.py" not in files:
+                  continue
+              module = os.path.basename(root)
+              if touched_modules is not None and module not in touched_modules:
+                  continue
+
+              manifest_path = os.path.join(root, "__manifest__.py")
+              try:
+                  manifest = ast.literal_eval(open(manifest_path).read())
+              except (SyntaxError, ValueError) as e:
+                  errors.append(
+                      f"{manifest_path}: cannot parse as literal dict ({e}); "
+                      f"rewrite manifest as a plain dict literal"
+                  )
+                  continue
+              if not isinstance(manifest, dict):
+                  errors.append(f"{manifest_path}: top-level value is not a dict")
+                  continue
+
+              author = manifest.get("author", "") or ""
+              website = manifest.get("website", "") or ""
+
+              if REQUIRED_AUTHOR not in author:
+                  errors.append(
+                      f"{manifest_path}: 'author' must contain '{REQUIRED_AUTHOR}' "
+                      f"(got: {author!r})"
+                  )
+              for pat, msg in FORBIDDEN_AUTHOR_PATTERNS:
+                  if re.search(pat, author):
+                      errors.append(
+                          f"{manifest_path}: 'author' contains forbidden form — {msg} "
+                          f"(got: {author!r})"
+                      )
+
+              if website != REQUIRED_WEBSITE:
+                  errors.append(
+                      f"{manifest_path}: 'website' must be exactly '{REQUIRED_WEBSITE}' "
+                      f"(got: {website!r})"
+                  )
+
+          if errors:
+              print("❌ Branding violations:")
+              for e in errors:
+                  print(f"  {e}")
+              sys.exit(1)
+          print(f"✓ Branding OK ({'PR-scoped' if touched_modules else 'full'} scan)")
+          PYEOF
