@@ -306,8 +306,13 @@ jobs:
       - name: flake8
         run: |
           FILES="${{ steps.scope.outputs.files }}"
-          if [ -n "$FILES" ]; then
-            # PR mode: check only changed .py files
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # PR mode: only changed .py files. If none, skip (don't full-scan
+            # the repo and surface pre-existing violations unrelated to the PR).
+            if [ -z "$FILES" ]; then
+              echo "✓ PR no toca archivos .py — skip flake8"
+              exit 0
+            fi
             if [ -f .flake8 ]; then
               echo "$FILES" | xargs flake8
             else
@@ -325,7 +330,11 @@ jobs:
       - name: isort
         run: |
           FILES="${{ steps.scope.outputs.files }}"
-          if [ -n "$FILES" ]; then
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            if [ -z "$FILES" ]; then
+              echo "✓ PR no toca archivos .py — skip isort"
+              exit 0
+            fi
             if [ -f .isort.cfg ] || [ -f pyproject.toml ]; then
               echo "$FILES" | xargs isort --check-only --diff
             else
