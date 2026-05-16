@@ -133,7 +133,8 @@ jobs:
           # - xml-field-numeric-without-eval / xml-field-bool-without-eval: Odoo accepts plain values in data files
           # - xml-dangerous-qweb-replace-low-priority: valid when devs know what they're doing
           # - prefer-readme-rst: BMYA repos use README.md by convention, not OCA's .rst
-          DISABLED="xml-deprecated-data-node|xml-id-position-first|xml-header-wrong|xml-header-missing|xml-field-numeric-without-eval|xml-field-bool-without-eval|xml-dangerous-qweb-replace-low-priority|prefer-readme-rst"
+          # - xml-oe-structure-missing-id: Odoo doesn't require oe_structure to have an id
+          DISABLED="xml-deprecated-data-node|xml-id-position-first|xml-header-wrong|xml-header-missing|xml-field-numeric-without-eval|xml-field-bool-without-eval|xml-dangerous-qweb-replace-low-priority|prefer-readme-rst|xml-oe-structure-missing-id"
 
           # Run checks, capture output (always exit 0 here so we can filter)
           set +e
