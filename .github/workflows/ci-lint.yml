@@ -130,9 +130,10 @@ jobs:
           # - xml-deprecated-data-node: Odoo/Enterprise still uses <odoo><data noupdate="1">
           # - xml-id-position-first: attribute ordering is cosmetic
           # - xml-header-wrong / xml-header-missing: Odoo loads files with any header (or none)
-          # - xml-field-numeric-without-eval: Odoo accepts plain numeric values in data files
+          # - xml-field-numeric-without-eval / xml-field-bool-without-eval: Odoo accepts plain values in data files
           # - xml-dangerous-qweb-replace-low-priority: valid when devs know what they're doing
-          DISABLED="xml-deprecated-data-node|xml-id-position-first|xml-header-wrong|xml-header-missing|xml-field-numeric-without-eval|xml-dangerous-qweb-replace-low-priority"
+          # - prefer-readme-rst: BMYA repos use README.md by convention, not OCA's .rst
+          DISABLED="xml-deprecated-data-node|xml-id-position-first|xml-header-wrong|xml-header-missing|xml-field-numeric-without-eval|xml-field-bool-without-eval|xml-dangerous-qweb-replace-low-priority|prefer-readme-rst"
 
           # Run checks, capture output (always exit 0 here so we can filter)
           set +e
@@ -209,19 +210,25 @@ jobs:
                           content = open(os.path.join(dirpath, fn)).read()
                       except Exception:
                           continue
-                      # Find classes that declare _name
+                      # Find classes that declare _name. Capture base class list so we
+                      # can skip TransientModel / AbstractModel without relying on the
+                      # _transient / _abstract attribute (which Odoo sets internally and
+                      # subclasses don't usually re-declare).
                       for cls_match in re.finditer(
-                          r'class\s+\w+\s*\([^)]*\):\s*((?:(?!\nclass\s).)*)',
+                          r'class\s+\w+\s*\(([^)]*)\):\s*((?:(?!\nclass\s).)*)',
                           content, re.DOTALL
                       ):
-                          body = cls_match.group(1)
+                          bases = cls_match.group(1)
+                          body = cls_match.group(2)
+                          if re.search(r'\b(?:TransientModel|AbstractModel)\b', bases):
+                              continue
                           # The leading boundary (?<![a-zA-Z_]) prevents matching
                           # `comodel_name="res.users"` inside field declarations.
                           name_m = re.search(r'(?<![a-zA-Z_])_name\s*=\s*["\']([a-z][a-z0-9_.]+)["\']', body)
                           if not name_m:
                               continue
                           model_name = name_m.group(1)
-                          # Skip abstract and transient models
+                          # Skip abstract and transient models (some legacy modules set the attribute manually)
                           if re.search(r'_abstract\s*=\s*True', body):
                               continue
                           if re.search(r'_transient\s*=\s*True', body):
