@@ -125,7 +125,14 @@ jobs:
           # - xml-id-position-first: attribute ordering is cosmetic, not enforced by Odoo
           # - xml-header-wrong: Odoo uses utf-8 (lowercase, no space), OCA wants UTF-8 with space
           # - xml-dangerous-qweb-replace-low-priority: valid when devs know what they're doing
-          DISABLED="xml-deprecated-data-node|xml-id-position-first|xml-header-wrong|xml-dangerous-qweb-replace-low-priority"
+          # Stylistic checks we don't enforce — Odoo accepts both forms and
+          # codifying them across the legacy corpus is not worth the churn.
+          # - xml-deprecated-data-node: Odoo/Enterprise still uses <odoo><data noupdate="1">
+          # - xml-id-position-first: attribute ordering is cosmetic
+          # - xml-header-wrong / xml-header-missing: Odoo loads files with any header (or none)
+          # - xml-field-numeric-without-eval: Odoo accepts plain numeric values in data files
+          # - xml-dangerous-qweb-replace-low-priority: valid when devs know what they're doing
+          DISABLED="xml-deprecated-data-node|xml-id-position-first|xml-header-wrong|xml-header-missing|xml-field-numeric-without-eval|xml-dangerous-qweb-replace-low-priority"
 
           # Run checks, capture output (always exit 0 here so we can filter)
           set +e
@@ -208,7 +215,9 @@ jobs:
                           content, re.DOTALL
                       ):
                           body = cls_match.group(1)
-                          name_m = re.search(r'_name\s*=\s*["\']([a-z][a-z0-9_.]+)["\']', body)
+                          # The leading boundary (?<![a-zA-Z_]) prevents matching
+                          # `comodel_name="res.users"` inside field declarations.
+                          name_m = re.search(r'(?<![a-zA-Z_])_name\s*=\s*["\']([a-z][a-z0-9_.]+)["\']', body)
                           if not name_m:
                               continue
                           model_name = name_m.group(1)
@@ -219,7 +228,7 @@ jobs:
                               continue
                           # Skip extensions: _name = 'X' + _inherit = 'X' (or _inherit = ['X', ...])
                           # These add fields/methods to existing models and don't need new access rules
-                          inherit_m = re.search(r'_inherit\s*=\s*["\']([a-z][a-z0-9_.]+)["\']', body)
+                          inherit_m = re.search(r'(?<![a-zA-Z_])_inherit\s*=\s*["\']([a-z][a-z0-9_.]+)["\']', body)
                           if inherit_m and inherit_m.group(1) == model_name:
                               continue
                           inherit_list_m = re.search(r'_inherit\s*=\s*\[([^\]]+)\]', body)
