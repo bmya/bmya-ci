@@ -249,21 +249,27 @@ jobs:
               if not models:
                   continue
 
-              # Parse ir.model.access.csv
+              # Parse ir.model.access.csv. Keep the raw model_id:id strings (with or
+              # without module prefix). We compare BY BUILDING the expected reference
+              # from each model name — naive `_` -> `.` is ambiguous for models like
+              # 'l10n_cl_ine.correction_index' where parts contain underscores.
               access_file = os.path.join(root, 'security', 'ir.model.access.csv')
-              covered = set()
+              covered_refs = set()
               if os.path.exists(access_file):
                   with open(access_file, newline='') as f:
                       reader = csv.DictReader(f)
                       for row in reader:
                           # Support both 'model_id:id' and 'model_id/id' header formats
-                          field = row.get('model_id:id') or row.get('model_id/id') or ''
-                          # 'model_account_move' -> 'account.move'
-                          name = re.sub(r'^model_', '', field).replace('_', '.')
-                          covered.add(name)
+                          field = (row.get('model_id:id') or row.get('model_id/id') or '').strip()
+                          if field:
+                              # Keep the suffix after the last '.' (module prefix is optional)
+                              # e.g. 'l10n_cl_stock.model_l10n_cl_ine_correction_index' → 'model_l10n_cl_ine_correction_index'
+                              covered_refs.add(field.rsplit('.', 1)[-1])
 
               for model in sorted(models):
-                  if model not in covered:
+                  # Expected csv reference for model 'a.b.c' is 'model_a_b_c'
+                  expected = 'model_' + model.replace('.', '_')
+                  if expected not in covered_refs:
                       errors.append(f"  {module}: '{model}' missing from security/ir.model.access.csv")
 
           if errors:
