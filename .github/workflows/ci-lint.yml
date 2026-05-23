@@ -8,7 +8,10 @@ name: CI Lint (reusable)
 #   - ci/odoolint  → OCA odoo-pre-commit-hooks (manifests, XML, deprecations)
 #   - ci/security  → ir.model.access.csv completeness (all models have access rules)
 #   - ci/style     → flake8 + isort (PEP8 + Odoo conventions)
-#   - ci/branding  → manifest 'author' / 'website' canonicalization (BMYA repos only)
+#   - ci/branding  → manifest 'author' / 'website' canonicalization
+#                    (gated by `branding_mode` input: strict|skip; default strict;
+#                    accepts coautoría "<X>, Blanco Martín y Asociados SpA";
+#                    per-module excludes via .bmya-ci.yml at repo root)
 #
 # On pull_request: checks only modules/files touched by the PR.
 # On workflow_dispatch: checks the entire repo.
@@ -21,6 +24,16 @@ on:
       odoo_version:
         description: "Odoo version (e.g. 17.0, 18.0, 19.0, master)"
         required: true
+        type: string
+      branding_mode:
+        description: >-
+          Branding check policy. "strict" enforces BMYA author/website (or
+          coauthorship "<Original>, Blanco Martín y Asociados SpA") and
+          respects per-module excludes from .bmya-ci.yml. "skip" disables
+          the branding job entirely (use for BMYA forks of upstream OCA
+          repos that should not be re-branded).
+        required: false
+        default: "strict"
         type: string
 
 jobs:
@@ -374,9 +387,12 @@ jobs:
   branding:
     name: ci/branding
     runs-on: ubuntu-latest
-    # BMYA-only check: enforces canonical author/website in __manifest__.py.
-    # Add new BMYA repos to this list as they appear.
-    if: contains(fromJSON('["odoo-bmya","bmya-enterprise","bmya-enterprise-release","bmya-tools","bmya-ai","bmya-crm","odoo-partner-tools"]'), github.event.repository.name)
+    # Gated by branding_mode input. "skip" → job not run (OCA fork repos).
+    # Per-repo categorization (bmya / cliente / oca) is decided at the caller's
+    # `.github/workflows/ci.yml` via the `branding_mode` input; that decision
+    # lives in runboat_repos.yml `repo_settings` and is rendered by the
+    # submodule-webhook /provision flow.
+    if: inputs.branding_mode != 'skip'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -386,6 +402,9 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install pyyaml
+        run: pip install pyyaml
+
       - name: Validate manifest author/website
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
@@ -393,6 +412,7 @@ jobs:
         run: |
           python3 - <<'PYEOF'
           import os, re, sys, ast, subprocess
+          import yaml
 
           REQUIRED_AUTHOR = "Blanco Martín y Asociados SpA"
           REQUIRED_WEBSITE = "https://www.bmya.cl"
@@ -405,6 +425,26 @@ jobs:
               (r"Blanco Mart[ií]n\s*&\s*Asociados",  "use 'Blanco Martín y Asociados SpA' (use 'y' instead of '&'; include 'SpA')"),
               (r"\bBlanco Martin\b",                 "use 'Blanco Martín y Asociados SpA' (must have tilde in 'Martín')"),
           ]
+
+          # Per-module excludes from .bmya-ci.yml at repo root:
+          #   branding:
+          #     exclude:
+          #       - shopify_emipro          # third-party comprado a Emipro
+          #       - paid_bank_statement
+          exclude_modules = set()
+          try:
+              with open(".bmya-ci.yml", encoding="utf-8") as f:
+                  cfg = yaml.safe_load(f) or {}
+              for m in ((cfg.get("branding") or {}).get("exclude") or []):
+                  if isinstance(m, str):
+                      exclude_modules.add(m)
+              if exclude_modules:
+                  print(f"Excluding from branding: {sorted(exclude_modules)}")
+          except FileNotFoundError:
+              pass
+          except yaml.YAMLError as e:
+              print(f"❌ .bmya-ci.yml: invalid YAML ({e})")
+              sys.exit(1)
 
           event = os.environ.get("GITHUB_EVENT_NAME", "")
           base_sha = os.environ.get("BASE_SHA", "")
@@ -436,6 +476,9 @@ jobs:
               module = os.path.basename(root)
               if touched_modules is not None and module not in touched_modules:
                   continue
+              if module in exclude_modules:
+                  print(f"Skipping branding for excluded module: {module}")
+                  continue
 
               manifest_path = os.path.join(root, "__manifest__.py")
               try:
@@ -458,6 +501,12 @@ jobs:
               author = manifest.get("author", "") or ""
               website = manifest.get("website", "") or ""
 
+              # Accept both pure BMYA authorship and coauthorship:
+              #   "Blanco Martín y Asociados SpA"          (pure)
+              #   "Akretion, Blanco Martín y Asociados SpA" (coautoría con OCA-derivado)
+              # In coauthorship the module may carry the original author's
+              # website (OCA/etc.), so we only enforce the BMYA website when
+              # authorship is pure BMYA.
               if REQUIRED_AUTHOR not in author:
                   errors.append(
                       f"{manifest_path}: 'author' must contain '{REQUIRED_AUTHOR}' "
@@ -470,7 +519,9 @@ jobs:
                           f"(got: {author!r})"
                       )
 
-              if website != REQUIRED_WEBSITE:
+              # Pure BMYA = author exactly equals REQUIRED_AUTHOR after stripping.
+              is_pure_bmya = author.strip() == REQUIRED_AUTHOR
+              if is_pure_bmya and website != REQUIRED_WEBSITE:
                   errors.append(
                       f"{manifest_path}: 'website' must be exactly '{REQUIRED_WEBSITE}' "
                       f"(got: {website!r})"
