@@ -1,10 +1,47 @@
 name: Build custom OCA CI images
 
+# Estas imagenes son una capa fina (FROM ghcr.io/oca/oca-ci/... + unas wheels)
+# sobre una imagen que OCA reconstruye TODOS LOS DIAS, y el core de Odoo
+# community viaja horneado en ella (/opt/odoo/addons). Enterprise, en cambio,
+# runboat lo baja al HEAD del espejo bmya/enterprise@<ver> en cada build. O sea
+# que si esto solo se rebuildea cuando alguien toca el Dockerfile, el community
+# queda congelado ese dia y enterprise sigue avanzando: el dia que enterprise
+# empieza a usar un simbolo nuevo de community, TODOS los builds de esa rama
+# fallan con un ImportError que se lee como si lo hubiera roto el PR.
+# Paso el 09-sep-2026 (imagen del 18-ago vs enterprise del 08-sep, simbolo
+# _ignore_tax_lock_date). Invariante: community de la imagen >= espejo de
+# enterprise. De ahi el schedule.
+
 on:
   push:
     branches: [main]
     paths:
       - "docker/oca-ci/**"
+  schedule:
+    # 22:00 UTC (19:00 Chile), y la hora importa por dos lados:
+    #
+    #  - Piso: OCA publica su :latest ~08:50 UTC (su cron dice 04:00, las
+    #    corridas caen mas tarde). Antes de eso rebuildeariamos sobre la base
+    #    de ayer.
+    #  - Techo: la imagen se lleva el upstream HEAD del momento en que corre,
+    #    mientras el espejo bmya/enterprise se sincroniza a mano y puede tomar
+    #    un commit de cualquier hora del dia (el 10-sep-2026: commits de 09:54,
+    #    10:31 y 11:27 UTC). Como el R&D de Odoo pushea en horario europeo,
+    #    construir al final del dia UTC hace que la imagen del dia sea >= a
+    #    cualquier cosa que un sync de ese dia pueda haber tomado.
+    #
+    # No lo cierra del todo: un sync posterior a esta corrida espera hasta
+    # manana. Ahi el atajo es `gh workflow run build-oca-ci-images.yml`, que es
+    # exactamente lo que imprime C15 cuando detecta el skew.
+    #
+    # El cron de OCA tampoco es infalible (fallo el 06 y el 07-sep-2026): esto
+    # es best-effort, y el testigo es el check C15 de
+    # bmya-infrastructure/scripts/preflight-verify.sh.
+    #
+    # OJO: GitHub deshabilita los workflows programados de un repo sin actividad
+    # por 60 dias, y este repo quedo semi-dormido cuando el CI paso a in-house.
+    # Si eso pasa, no falla nada: simplemente deja de correr. Lo caza C15.
+    - cron: "0 22 * * *"
   workflow_dispatch:
 
 jobs:
