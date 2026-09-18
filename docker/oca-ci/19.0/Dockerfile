@@ -6,6 +6,42 @@ RUN pip install --no-cache-dir \
     "transbank-sdk==6.1.0" \
     "phonenumbers==9.0.29"
 
+# PyPDF2 2.12.1: la version que corre en PRODUCCION, y la que el `sign` de
+# Enterprise necesita.
+#
+# La base es py3.10, y el requirements.txt de Odoo 19 elige por version de
+# Python:
+#
+#   PyPDF2==1.26.0 ; python_version <= '3.10'
+#   PyPDF2==2.12.1 ; python_version > '3.10' and python_version < '3.13'
+#   PyPDF==5.4.0   ; python_version >= '3.13'
+#
+# O sea que esta imagen se queda con la 1.26.0, mientras las instancias de
+# bmya.cloud corren Python 3.12 y por lo tanto la 2.12.1. Esa diferencia no es
+# academica: `sign/models/sign_document.py:437` hace `box.lower_left`, un alias
+# en snake_case que aparecio recien en PyPDF2 2.x. Con la 1.26 --que solo tiene
+# `lowerLeft`-- TODO test que complete una firma revienta con
+#
+#   AttributeError: 'RectangleObject' object has no attribute 'lower_left'
+#
+# y el sintoma se lee como "el PR rompio el modulo de firmas", igual que el caso
+# del community desactualizado documentado en bmya-infrastructure/CLAUDE.md.
+#
+# El pin de Odoo es conservador --sigue lo que empaqueta Ubuntu-- y no una
+# incompatibilidad: PyPDF2 2.12.1 declara python_requires >=3.6 y anda de sobra
+# en 3.10. Lo correcto es que la CI pruebe con la misma libreria que produccion,
+# no con la que le tocaria a un Ubuntu mas viejo del que usamos.
+#
+# El dia que OCA publique una py3.12-odoo19.0, esta linea sale sola: el
+# requirements de Odoo ya elegiria la 2.12.1.
+RUN pip install --no-cache-dir "PyPDF2==2.12.1" \
+    && python3 -c "\
+import PyPDF2; \
+from PyPDF2.generic import RectangleObject; \
+assert PyPDF2.__version__ == '2.12.1', 'version inesperada: ' + PyPDF2.__version__; \
+assert hasattr(RectangleObject, 'lower_left'), 'falta lower_left: sign de Enterprise no va a andar'; \
+print('PyPDF2 ' + PyPDF2.__version__ + ' con lower_left OK')"
+
 # pybmyafintoc: dependencia propietaria de account_bank_statement_online_import_fintoc
 # (bmya-enterprise), declarada en external_dependencies. Odoo valida esa clave con
 # importlib.metadata ANTES de importar el módulo, así que sin esto el módulo no
