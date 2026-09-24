@@ -61,6 +61,11 @@ jobs:
             python: "py3.10"
           - version: "19.0"
             python: "py3.10"
+          # 20.0 nace en py3.12 (OCA no publica py3.10 para 20.0). El nombre
+          # de la imagen cambia con el Python: runboat_repos.yml y el check C15
+          # de bmya-infrastructure lo leen de la entrada, no lo arman a mano.
+          - version: "20.0"
+            python: "py3.12"
 
     steps:
       - uses: actions/checkout@v4
