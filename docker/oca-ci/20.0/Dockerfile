@@ -1,5 +1,34 @@
 FROM ghcr.io/oca/oca-ci/py3.12-odoo20.0:latest
 
+# Core de Odoo refrescado aca, y no el que trae la base. OCA no publica esta
+# imagen desde el 22-sep-2026: su CI la prueba contra postgres:12, y Odoo 20.0
+# ya usa SQL de PG16 (`any_value`, desde 1316a245c09), asi que los tests fallan y
+# el :latest queda congelado. Con eso el community de los builds se atrasa
+# respecto del espejo bmya/enterprise@20.0, que es justo el invariante que
+# este repo cuida (ver el comentario del workflow): el primer sintoma fue la
+# demo de `account` en es_419 (codigo de diario > 7, corregido upstream en
+# 347719b4e1b). Nuestro runboat corre PG16, asi que el core nuevo anda.
+#
+# Misma receta que el Dockerfile de OCA: el ADD del ref invalida la capa cuando
+# upstream avanza, y el install editable queda apuntando a /opt/odoo. Las
+# dependencias las sigue poniendo la base (requirements de OCB); si Odoo
+# agrega una en setup.py, el `pip install -e` la instala.
+#
+# Cuando OCA vuelva a publicar (`/tmp/odoo-version.json` de su :latest mas
+# nuevo que el 22-sep), esto sobra y se puede sacar.
+ADD https://api.github.com/repos/odoo/odoo/git/refs/heads/20.0 /tmp/odoo-version.json
+RUN rm -rf /opt/odoo \
+    && mkdir /tmp/getodoo \
+    && (curl -sSL https://github.com/odoo/odoo/tarball/20.0 | tar -C /tmp/getodoo -xz) \
+    && mv /tmp/getodoo/* /opt/odoo \
+    && rmdir /tmp/getodoo \
+    && pip install --no-cache-dir -e /opt/odoo --config-setting=editable_mode=compat \
+    && python3 -c "\
+import json, odoo.release as r; \
+sha = json.load(open('/tmp/odoo-version.json'))['object']['sha']; \
+assert r.serie == '20.0', 'serie inesperada: ' + r.serie; \
+print('core de Odoo ' + r.serie + ' refrescado a ' + sha[:12])"
+
 # Extra Python dependencies required by BMYA modules not present in the base image
 RUN pip install --no-cache-dir \
     "pdf417gen==0.7.1" \
