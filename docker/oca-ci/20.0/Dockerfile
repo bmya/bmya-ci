@@ -29,6 +29,29 @@ sha = json.load(open('/tmp/odoo-version.json'))['object']['sha']; \
 assert r.serie == '20.0', 'serie inesperada: ' + r.serie; \
 print('core de Odoo ' + r.serie + ' refrescado a ' + sha[:12])"
 
+# Dependencias opcionales de Odoo 20 que la base no trae. Sin ellas los builds
+# arrancan igual, pero degradados y con warnings en el log:
+# - libmagic1: python-magic esta en el requirements.txt de Odoo 20 y la base lo
+#   instala, pero sin la libreria del sistema no carga ("failed to find
+#   libmagic") y odoo.tools.mimetypes cae a su detector propio, menos preciso.
+# - markdown2: no esta en el requirements.txt de Odoo. La usan `mail` (vista
+#   previa de adjuntos .md del chatter), `ai` de enterprise (pasa a HTML las
+#   respuestas de los agentes y los campos generados por IA) y `documents`
+#   (vista previa de .md). bmya/odoo-bmya#122 la suma al requirements.txt de
+#   odoo-bmya, pero runboat no instala ese archivo: oca_install_addons solo lee
+#   test-requirements.txt y los pyproject.toml de cada addon.
+# OCA/oca-ci#132 agrega markdown2 a la base; cuando se publique, esa parte sobra.
+RUN apt-get update -qq \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -qq --no-install-recommends libmagic1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir "markdown2==2.5.5" \
+    && python3 -c "\
+import magic, markdown2; \
+assert magic.from_buffer(b'%PDF-1.4\n', mime=True) == 'application/pdf', 'libmagic no detecta un PDF'; \
+html = markdown2.markdown('## T\n\n**b**', extras=['fenced-code-blocks', 'tables', 'strike', 'cuddled-lists']); \
+assert '<h2>T</h2>' in html and '<strong>b</strong>' in html, 'markdown2 no renderiza: ' + html; \
+print('libmagic OK, markdown2 ' + markdown2.__version__ + ' OK')"
+
 # Extra Python dependencies required by BMYA modules not present in the base image
 RUN pip install --no-cache-dir \
     "pdf417gen==0.7.1" \
