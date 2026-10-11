@@ -6,7 +6,8 @@ name: CI Lint (reusable)
 # Produces five GitHub Checks on every PR:
 #   - ci/commits   → PR must have exactly 1 commit (squash discipline)
 #   - ci/odoolint  → OCA odoo-pre-commit-hooks (manifests, XML, deprecations)
-#   - ci/security  → ir.model.access.csv completeness (all models have access rules)
+#   - ci/security  → access completeness (all models have access rules):
+#                    security/ir.model.access.csv (<= 19.0) or security/ir.access.csv (20.0+)
 #   - ci/style     → flake8 + isort (PEP8 + Odoo conventions)
 #   - ci/branding  → manifest 'author' / 'website' canonicalization
 #                    (gated by `branding_mode` input: strict|skip; default strict;
@@ -176,7 +177,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Check ir.model.access.csv completeness
+      - name: Check ir.model.access.csv / ir.access.csv completeness
         run: |
           python3 - <<'PYEOF'
           import os, re, sys, csv, subprocess
@@ -262,35 +263,50 @@ jobs:
               if not models:
                   continue
 
-              # Parse ir.model.access.csv. Keep the raw model_id:id strings (with or
-              # without module prefix). We compare BY BUILDING the expected reference
+              # Two formats, one per Odoo era:
+              #  - <= 19.0: security/ir.model.access.csv, 'model_id:id' holds an
+              #    xml_id ('model_account_move', module prefix optional).
+              #  - 20.0+: ir.model.access and ir.rule are gone; security/ir.access.csv
+              #    ('id,name,model_id,group_id/id,operation,domain') holds the model
+              #    NAME in 'model_id' ('account.move').
+              # An xml_id column ('model_id:id' / 'model_id/id') is accepted in
+              # either file. xml_ids are compared BY BUILDING the expected reference
               # from each model name — naive `_` -> `.` is ambiguous for models like
               # 'l10n_cl_ine.correction_index' where parts contain underscores.
-              access_file = os.path.join(root, 'security', 'ir.model.access.csv')
+              access_files = ['ir.model.access.csv', 'ir.access.csv']
               covered_refs = set()
-              if os.path.exists(access_file):
+              covered_names = set()
+              present = []
+              for fn in access_files:
+                  access_file = os.path.join(root, 'security', fn)
+                  if not os.path.exists(access_file):
+                      continue
+                  present.append(f'security/{fn}')
                   with open(access_file, newline='') as f:
                       reader = csv.DictReader(f)
                       for row in reader:
-                          # Support both 'model_id:id' and 'model_id/id' header formats
-                          field = (row.get('model_id:id') or row.get('model_id/id') or '').strip()
-                          if field:
+                          ref = (row.get('model_id:id') or row.get('model_id/id') or '').strip()
+                          if ref:
                               # Keep the suffix after the last '.' (module prefix is optional)
                               # e.g. 'l10n_cl_stock.model_l10n_cl_ine_correction_index' → 'model_l10n_cl_ine_correction_index'
-                              covered_refs.add(field.rsplit('.', 1)[-1])
+                              covered_refs.add(ref.rsplit('.', 1)[-1])
+                          name = (row.get('model_id') or '').strip()
+                          if name:
+                              covered_names.add(name)
+              where = ' / '.join(present) or 'security/ir.model.access.csv (<= 19.0) or security/ir.access.csv (20.0+)'
 
               for model in sorted(models):
                   # Expected csv reference for model 'a.b.c' is 'model_a_b_c'
                   expected = 'model_' + model.replace('.', '_')
-                  if expected not in covered_refs:
-                      errors.append(f"  {module}: '{model}' missing from security/ir.model.access.csv")
+                  if model not in covered_names and expected not in covered_refs:
+                      errors.append(f"  {module}: '{model}' missing from {where}")
 
           if errors:
               print("❌ Models without access rules:")
               for e in errors:
                   print(e)
               sys.exit(1)
-          print("✓ All models have ir.model.access.csv entries")
+          print("✓ All models have access entries")
           PYEOF
         env:
           GITHUB_EVENT_NAME: ${{ github.event_name }}
