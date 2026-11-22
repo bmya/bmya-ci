@@ -1,5 +1,38 @@
 FROM ghcr.io/oca/oca-ci/py3.12-odoo20.0:latest
 
+# Core de Odoo refrescado aca, y no el que trae la base. OCA dejo de publicar
+# py3.12-odoo20.0 el 20-nov-2026 (su build falla con 403), asi que su :latest
+# quedo con el core del 19-nov. Enterprise siguio avanzando: desde fcc7fdbd48c
+# (20-nov) account_accountant usa el campo sanitized_account_number de
+# account.bank.statement.line, que entro al community en 2002292336cd el mismo
+# dia, y todo build de 20.0 que crea lineas de extracto falla con
+# "Invalid field 'sanitized_account_number'". Es el invariante del workflow
+# (community de la imagen >= espejo de enterprise).
+#
+# Misma receta que bmya/bmya-ci#8, pero sin api.github.com. El ADD a la API
+# respondia 403 en el runner (limite de la API anonima) y el build no publicaba.
+# El SHA lo resuelve el workflow con `git ls-remote` y llega como build-arg; el
+# tarball se baja de ese SHA exacto. Un SHA nuevo invalida la capa, igual que el
+# ADD del ref en el Dockerfile de OCA. /tmp/odoo-version.json se escribe con el
+# formato de OCA para que el chequeo documentado en bmya-infrastructure
+# (`cat /tmp/odoo-version.json`) siga diciendo que core trae la imagen.
+#
+# Cuando OCA vuelva a publicar (el /tmp/odoo-version.json de su :latest mas
+# nuevo que el 19-nov), esto sobra y se puede sacar, como en bmya/bmya-ci#10.
+ARG ODOO_SHA
+RUN test -n "$ODOO_SHA" || (echo "falta --build-arg ODOO_SHA (git ls-remote https://github.com/odoo/odoo refs/heads/20.0)" && exit 1) \
+    && rm -rf /opt/odoo \
+    && mkdir /tmp/getodoo \
+    && (curl -fsSL "https://codeload.github.com/odoo/odoo/tar.gz/$ODOO_SHA" | tar -C /tmp/getodoo -xz) \
+    && mv /tmp/getodoo/* /opt/odoo \
+    && rmdir /tmp/getodoo \
+    && pip install --no-cache-dir -e /opt/odoo --config-setting=editable_mode=compat \
+    && printf '{"ref": "refs/heads/20.0", "object": {"sha": "%s", "type": "commit"}}\n' "$ODOO_SHA" > /tmp/odoo-version.json \
+    && python3 -c "\
+import odoo.release as r; \
+assert r.serie == '20.0', 'serie inesperada: ' + r.serie; \
+print('core de Odoo ' + r.serie + ' refrescado a ' + '$ODOO_SHA'[:12])"
+
 # Dependencias opcionales de Odoo 20. Sin ellas los builds arrancan igual, pero
 # degradados y con warnings en el log:
 # - libmagic1: python-magic esta en el requirements.txt de Odoo 20 y la base lo
