@@ -80,10 +80,24 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # SHA del core de Odoo para el Dockerfile que lo refresca (hoy solo 20.0,
+      # ver docker/oca-ci/20.0/Dockerfile). Va por `git ls-remote` y no por
+      # api.github.com: el ADD a la API respondia 403 en este runner. Las
+      # versiones que no declaran ARG ODOO_SHA lo ignoran.
+      - name: Resolve odoo/odoo@${{ matrix.version }}
+        id: odoo
+        run: |
+          sha=$(git ls-remote https://github.com/odoo/odoo "refs/heads/${{ matrix.version }}" | cut -f1)
+          test -n "$sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "odoo/odoo@${{ matrix.version }} = $sha"
+
       - name: Build and push ${{ matrix.version }}
         uses: docker/build-push-action@v5
         with:
           context: docker/oca-ci/${{ matrix.version }}
+          build-args: |
+            ODOO_SHA=${{ steps.odoo.outputs.sha }}
           push: true
           tags: |
             ghcr.io/bmya/oca-ci/${{ matrix.python }}-odoo${{ matrix.version }}:latest
